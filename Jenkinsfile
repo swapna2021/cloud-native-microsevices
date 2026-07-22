@@ -9,7 +9,6 @@ pipeline {
 
     environment {
 
-        // Homebrew tools used by Jenkins on macOS
         PATH = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${env.PATH}"
 
         DOCKERHUB_USERNAME = "swapnamotupally"
@@ -18,24 +17,15 @@ pipeline {
 
         IMAGE_TAG = "${BUILD_NUMBER}"
 
-        EUREKA_IMAGE =
-            "${DOCKERHUB_USERNAME}/eureka-server:${IMAGE_TAG}"
-
-        EMPLOYEE_IMAGE =
-            "${DOCKERHUB_USERNAME}/employee-service:${IMAGE_TAG}"
-
-        DEPARTMENT_IMAGE =
-            "${DOCKERHUB_USERNAME}/department-service:${IMAGE_TAG}"
-
-        GATEWAY_IMAGE =
-            "${DOCKERHUB_USERNAME}/api-gateway:${IMAGE_TAG}"
+        EUREKA_IMAGE = "${DOCKERHUB_USERNAME}/eureka-server:${IMAGE_TAG}"
+        EMPLOYEE_IMAGE = "${DOCKERHUB_USERNAME}/employee-service:${IMAGE_TAG}"
+        DEPARTMENT_IMAGE = "${DOCKERHUB_USERNAME}/department-service:${IMAGE_TAG}"
+        GATEWAY_IMAGE = "${DOCKERHUB_USERNAME}/api-gateway:${IMAGE_TAG}"
 
         AWS_REGION = "ap-south-1"
         EKS_CLUSTER = "microservices-cluster"
         K8S_NAMESPACE = "microservices"
 
-        // Jenkins-specific kubeconfig.
-        // This prevents corruption of ~/.kube/config.
         KUBECONFIG = "${WORKSPACE}/.kube/config"
     }
 
@@ -53,6 +43,8 @@ pipeline {
             time: 45,
             unit: 'MINUTES'
         )
+
+        skipDefaultCheckout(true)
     }
 
     stages {
@@ -68,28 +60,40 @@ pipeline {
                 sh '''
                     set -e
 
-                    echo "Git:"
+                    echo "=============================="
+                    echo "Git"
+                    echo "=============================="
                     git --version
 
-                    echo "Java:"
+                    echo "=============================="
+                    echo "Java"
+                    echo "=============================="
                     java -version
 
-                    echo "Maven:"
+                    echo "=============================="
+                    echo "Maven"
+                    echo "=============================="
                     mvn --version
 
-                    echo "Docker:"
+                    echo "=============================="
+                    echo "Docker"
+                    echo "=============================="
                     docker --version
 
-                    echo "AWS CLI:"
+                    echo "=============================="
+                    echo "AWS CLI"
+                    echo "=============================="
                     aws --version
 
-                    echo "kubectl:"
+                    echo "=============================="
+                    echo "kubectl"
+                    echo "=============================="
                     kubectl version --client
                 '''
             }
         }
 
-        stage('Validate Kubernetes Files') {
+        stage('Validate Project Files') {
             steps {
                 sh '''
                     set -e
@@ -97,14 +101,27 @@ pipeline {
                     echo "Checking Kubernetes manifest files..."
 
                     test -f kubernetes/namespace.yml
-                    test -f kubernetes/gp3-storageclass.yml
                     test -f kubernetes/mysql.yml
                     test -f kubernetes/eureka.yml
                     test -f kubernetes/employee.yml
                     test -f kubernetes/department.yml
                     test -f kubernetes/api-gateway.yml
 
-                    echo "All required Kubernetes files are available."
+                    echo "Checking Dockerfiles..."
+
+                    test -f EurekaServer/Dockerfile
+                    test -f employee-service/Dockerfile
+                    test -f department-service/Dockerfile
+                    test -f ApiGateway/Dockerfile
+
+                    echo "Checking Maven files..."
+
+                    test -f EurekaServer/pom.xml
+                    test -f employee-service/pom.xml
+                    test -f department-service/pom.xml
+                    test -f ApiGateway/pom.xml
+
+                    echo "All required project files are available."
                 '''
             }
         }
@@ -199,10 +216,11 @@ pipeline {
                         -t "${GATEWAY_IMAGE}" \
                         ./ApiGateway
 
-                    echo "Created Docker images:"
+                    echo "=============================="
+                    echo "Created Docker Images"
+                    echo "=============================="
 
-                    docker images |
-                        grep "${DOCKERHUB_USERNAME}" || true
+                    docker images | grep "${DOCKERHUB_USERNAME}" || true
                 '''
             }
         }
@@ -233,7 +251,7 @@ pipeline {
                 sh '''
                     set -e
 
-                    echo "Pushing Eureka image..."
+                    echo "Pushing Eureka Server image..."
                     docker push "${EUREKA_IMAGE}"
 
                     echo "Pushing Employee Service image..."
@@ -244,6 +262,8 @@ pipeline {
 
                     echo "Pushing API Gateway image..."
                     docker push "${GATEWAY_IMAGE}"
+
+                    echo "All Docker images were pushed successfully."
                 '''
             }
         }
@@ -261,14 +281,16 @@ pipeline {
                     sh '''
                         set -e
 
-                        echo "AWS identity:"
+                        echo "=============================="
+                        echo "AWS Identity"
+                        echo "=============================="
+
                         aws sts get-caller-identity
 
-                        echo "Creating Jenkins-specific kubeconfig..."
+                        echo "Creating Jenkins kubeconfig..."
 
-                        mkdir -p "${WORKSPACE}/.kube"
+                        mkdir -p "$(dirname "${KUBECONFIG}")"
 
-                        # Remove any old or corrupted workspace kubeconfig.
                         rm -f "${KUBECONFIG}"
 
                         aws eks update-kubeconfig \
@@ -276,10 +298,16 @@ pipeline {
                             --name "${EKS_CLUSTER}" \
                             --kubeconfig "${KUBECONFIG}"
 
-                        echo "Current Kubernetes context:"
+                        echo "=============================="
+                        echo "Current Kubernetes Context"
+                        echo "=============================="
+
                         kubectl config current-context
 
-                        echo "Cluster nodes:"
+                        echo "=============================="
+                        echo "Cluster Nodes"
+                        echo "=============================="
+
                         kubectl get nodes -o wide
                     '''
                 }
@@ -301,12 +329,14 @@ pipeline {
 
                         kubectl apply \
                             -f kubernetes/namespace.yml
+
+                        kubectl get namespace "${K8S_NAMESPACE}"
                     '''
                 }
             }
         }
 
-        stage('Configure EBS Storage') {
+        stage('Verify gp3 StorageClass') {
             steps {
                 withCredentials([
                     [
@@ -319,10 +349,9 @@ pipeline {
                     sh '''
                         set -e
 
-                        echo "Applying gp3 StorageClass..."
+                        echo "Checking existing gp3 StorageClass..."
 
-                        kubectl apply \
-                            -f kubernetes/gp3-storageclass.yml
+                        kubectl get storageclass gp3
 
                         echo "Available StorageClasses:"
 
@@ -364,7 +393,7 @@ pipeline {
                         kubectl get pvc \
                             -n "${K8S_NAMESPACE}"
 
-                        echo "Waiting for MySQL Deployment..."
+                        echo "Waiting for MySQL deployment..."
 
                         kubectl rollout status \
                             deployment/mysql-db \
@@ -388,11 +417,13 @@ pipeline {
                     sh '''
                         set -e
 
-                        echo "Deploying Eureka Server..."
+                        echo "Applying Eureka Server resources..."
 
                         kubectl apply \
                             -f kubernetes/eureka.yml \
                             -n "${K8S_NAMESPACE}"
+
+                        echo "Updating Eureka Server image..."
 
                         kubectl set image \
                             deployment/eureka-server \
@@ -442,11 +473,13 @@ pipeline {
                             sh '''
                                 set -e
 
-                                echo "Deploying Employee Service..."
+                                echo "Applying Employee Service resources..."
 
                                 kubectl apply \
                                     -f kubernetes/employee.yml \
                                     -n "${K8S_NAMESPACE}"
+
+                                echo "Updating Employee Service image..."
 
                                 kubectl set image \
                                     deployment/employee-service \
@@ -493,11 +526,13 @@ pipeline {
                             sh '''
                                 set -e
 
-                                echo "Deploying Department Service..."
+                                echo "Applying Department Service resources..."
 
                                 kubectl apply \
                                     -f kubernetes/department.yml \
                                     -n "${K8S_NAMESPACE}"
+
+                                echo "Updating Department Service image..."
 
                                 kubectl set image \
                                     deployment/department-service \
@@ -546,11 +581,13 @@ pipeline {
                     sh '''
                         set -e
 
-                        echo "Deploying API Gateway..."
+                        echo "Applying API Gateway resources..."
 
                         kubectl apply \
                             -f kubernetes/api-gateway.yml \
                             -n "${K8S_NAMESPACE}"
+
+                        echo "Updating API Gateway image..."
 
                         kubectl set image \
                             deployment/api-gateway \
@@ -609,7 +646,7 @@ pipeline {
                             -n "${K8S_NAMESPACE}" \
                             --timeout=300s
 
-                        echo "Confirming deployed image tags..."
+                        echo "Checking deployed images..."
 
                         kubectl get deployments \
                             -n "${K8S_NAMESPACE}" \
@@ -636,8 +673,7 @@ pipeline {
                         echo "Nodes"
                         echo "=============================="
 
-                        kubectl get nodes \
-                            -o 'custom-columns=NAME:.metadata.name,TYPE:.metadata.labels.node\\.kubernetes\\.io/instance-type,POD-CAPACITY:.status.capacity.pods'
+                        kubectl get nodes -o wide
 
                         echo "=============================="
                         echo "Deployments"
@@ -645,14 +681,6 @@ pipeline {
 
                         kubectl get deployments \
                             -n "${K8S_NAMESPACE}"
-
-                        echo "=============================="
-                        echo "Deployed Images"
-                        echo "=============================="
-
-                        kubectl get deployments \
-                            -n "${K8S_NAMESPACE}" \
-                            -o 'custom-columns=DEPLOYMENT:.metadata.name,IMAGE:.spec.template.spec.containers[*].image'
 
                         echo "=============================="
                         echo "Pods"
@@ -683,6 +711,14 @@ pipeline {
                         kubectl get storageclass
 
                         echo "=============================="
+                        echo "Deployed Images"
+                        echo "=============================="
+
+                        kubectl get deployments \
+                            -n "${K8S_NAMESPACE}" \
+                            -o 'custom-columns=DEPLOYMENT:.metadata.name,IMAGE:.spec.template.spec.containers[*].image'
+
+                        echo "=============================="
                         echo "Jenkins Build"
                         echo "=============================="
 
@@ -698,13 +734,13 @@ pipeline {
 
         success {
             echo """
-            CI/CD pipeline completed successfully.
+CI/CD pipeline completed successfully.
 
-            Jenkins build: ${BUILD_NUMBER}
-            Docker image tag: ${IMAGE_TAG}
-            EKS cluster: ${EKS_CLUSTER}
-            Kubernetes namespace: ${K8S_NAMESPACE}
-            """
+Jenkins build: ${BUILD_NUMBER}
+Docker image tag: ${IMAGE_TAG}
+EKS cluster: ${EKS_CLUSTER}
+Kubernetes namespace: ${K8S_NAMESPACE}
+"""
         }
 
         failure {
@@ -721,15 +757,17 @@ pipeline {
                 sh '''
                     set +e
 
-                    mkdir -p "${WORKSPACE}/.kube"
+                    if [ ! -f "${KUBECONFIG}" ]; then
 
-                    # Recreate the workspace kubeconfig safely.
-                    rm -f "${KUBECONFIG}"
+                        echo "Kubeconfig does not exist. Recreating it..."
 
-                    aws eks update-kubeconfig \
-                        --region "${AWS_REGION}" \
-                        --name "${EKS_CLUSTER}" \
-                        --kubeconfig "${KUBECONFIG}"
+                        mkdir -p "$(dirname "${KUBECONFIG}")"
+
+                        aws eks update-kubeconfig \
+                            --region "${AWS_REGION}" \
+                            --name "${EKS_CLUSTER}" \
+                            --kubeconfig "${KUBECONFIG}" || true
+                    fi
 
                     echo "=============================="
                     echo "Nodes"
@@ -761,6 +799,13 @@ pipeline {
                         -o wide || true
 
                     echo "=============================="
+                    echo "Services"
+                    echo "=============================="
+
+                    kubectl get services \
+                        -n "${K8S_NAMESPACE}" || true
+
+                    echo "=============================="
                     echo "PersistentVolumeClaims"
                     echo "=============================="
 
@@ -774,14 +819,14 @@ pipeline {
                     kubectl get storageclass || true
 
                     echo "=============================="
-                    echo "Pod descriptions"
+                    echo "Pod Descriptions"
                     echo "=============================="
 
                     kubectl describe pods \
                         -n "${K8S_NAMESPACE}" || true
 
                     echo "=============================="
-                    echo "Recent events"
+                    echo "Recent Events"
                     echo "=============================="
 
                     kubectl get events \
@@ -793,7 +838,7 @@ pipeline {
 
         always {
             sh '''
-                docker logout || true
+                docker logout >/dev/null 2>&1 || true
             '''
         }
     }
