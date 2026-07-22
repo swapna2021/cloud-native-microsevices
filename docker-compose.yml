@@ -1,0 +1,187 @@
+services:
+
+  mysql-db:
+    image: mysql:8.4
+    container_name: mysql-db
+    restart: unless-stopped
+
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+
+    ports:
+      - "3307:3306"
+
+    volumes:
+      - mysql-data:/var/lib/mysql
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h localhost -uroot -proot --silent"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+    networks:
+      - microservice-network
+
+
+  eureka-server:
+    build:
+      context: ./EurekaServer
+      dockerfile: Dockerfile
+
+    container_name: eureka-server
+    restart: unless-stopped
+
+    ports:
+      - "8761:8761"
+
+    environment:
+      SERVER_PORT: 8761
+      SPRING_APPLICATION_NAME: EUREKA-SERVER
+
+      EUREKA_CLIENT_REGISTER_WITH_EUREKA: "false"
+      EUREKA_CLIENT_FETCH_REGISTRY: "false"
+
+      EUREKA_INSTANCE_HOSTNAME: eureka-server
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q --spider http://localhost:8761/eureka/apps || exit 1"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 40s
+
+    networks:
+      - microservice-network
+
+
+  employee-service:
+    build:
+      context: ./employee-service
+      dockerfile: Dockerfile
+
+    container_name: employee-service
+    restart: unless-stopped
+
+    ports:
+      - "8081:8081"
+
+    environment:
+      SERVER_PORT: 8081
+      SPRING_APPLICATION_NAME: EMPLOYEE-SERVICE
+
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      EUREKA_CLIENT_REGISTER_WITH_EUREKA: "true"
+      EUREKA_CLIENT_FETCH_REGISTRY: "true"
+
+      EUREKA_INSTANCE_HOSTNAME: employee-service
+
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql-db:3306/employee_db?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+
+    depends_on:
+      mysql-db:
+        condition: service_healthy
+
+      eureka-server:
+        condition: service_healthy
+
+    networks:
+      - microservice-network
+
+
+  department-service:
+    build:
+      context: ./department-service
+      dockerfile: Dockerfile
+
+    container_name: department-service
+    restart: unless-stopped
+
+    ports:
+      - "8082:8082"
+
+    environment:
+      SERVER_PORT: 8082
+      SPRING_APPLICATION_NAME: DEPARTMENT-SERVICE
+
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      EUREKA_CLIENT_REGISTER_WITH_EUREKA: "true"
+      EUREKA_CLIENT_FETCH_REGISTRY: "true"
+
+      EUREKA_INSTANCE_HOSTNAME: department-service
+
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql-db:3306/department_db?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+
+    depends_on:
+      mysql-db:
+        condition: service_healthy
+
+      eureka-server:
+        condition: service_healthy
+
+      employee-service:
+        condition: service_started
+
+    networks:
+      - microservice-network
+
+
+  api-gateway:
+    build:
+      context: ./ApiGateway
+      dockerfile: Dockerfile
+
+    container_name: api-gateway
+    restart: unless-stopped
+
+    ports:
+      - "8090:8090"
+
+    environment:
+      SERVER_PORT: 8090
+      SPRING_APPLICATION_NAME: API-GATEWAY
+
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      EUREKA_CLIENT_REGISTER_WITH_EUREKA: "true"
+      EUREKA_CLIENT_FETCH_REGISTRY: "true"
+
+      EUREKA_INSTANCE_HOSTNAME: api-gateway
+
+    depends_on:
+      eureka-server:
+        condition: service_healthy
+
+      employee-service:
+        condition: service_started
+
+      department-service:
+        condition: service_started
+
+    networks:
+      - microservice-network
+
+
+volumes:
+  mysql-data:
+
+
+networks:
+  microservice-network:
+    driver: bridge

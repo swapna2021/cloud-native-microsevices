@@ -1,0 +1,7 @@
+INDEX VERSION 1.4+/Users/swapnam/Desktop/dockerisation/.metadata/.plugins/org.eclipse.wst.jsdt.core/indexes
+93048773.index
+1926359307.index
+2090063194.index
+2863763963.index
+4254174649.index
+348454274.index
