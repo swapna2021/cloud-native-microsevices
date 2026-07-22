@@ -20,3 +20,5 @@ jenkins_home/
 
 kubernetes/*secret*.yml
 kubernetes/*secret*.yaml
+.sonarlint/
+.metadata/
