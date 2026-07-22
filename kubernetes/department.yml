@@ -19,8 +19,8 @@ spec:
     spec:
       containers:
         - name: department-service
-          image: department-service:1.0
-          imagePullPolicy: Never
+          image: swapnamotupally/department-service:latest
+          imagePullPolicy: Always
 
           ports:
             - name: http

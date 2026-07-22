@@ -44,6 +44,11 @@ pipeline {
                 numToKeepStr: '10'
             )
         )
+
+        timeout(
+            time: 45,
+            unit: 'MINUTES'
+        )
     }
 
     stages {
@@ -57,6 +62,8 @@ pipeline {
         stage('Verify Required Tools') {
             steps {
                 sh '''
+                    set -e
+
                     echo "Git:"
                     git --version
 
@@ -78,6 +85,25 @@ pipeline {
             }
         }
 
+        stage('Validate Kubernetes Files') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "Checking Kubernetes manifest files..."
+
+                    test -f kubernetes/namespace.yml
+                    test -f kubernetes/mysql.yml
+                    test -f kubernetes/eureka.yml
+                    test -f kubernetes/employee.yml
+                    test -f kubernetes/department.yml
+                    test -f kubernetes/api-gateway.yml
+
+                    echo "All required Kubernetes files are available."
+                '''
+            }
+        }
+
         stage('Build Maven Projects') {
             parallel {
 
@@ -85,6 +111,8 @@ pipeline {
                     steps {
                         dir('EurekaServer') {
                             sh '''
+                                set -e
+
                                 mvn clean package -DskipTests
                                 ls -la target
                             '''
@@ -96,6 +124,8 @@ pipeline {
                     steps {
                         dir('employee-service') {
                             sh '''
+                                set -e
+
                                 mvn clean package -DskipTests
                                 ls -la target
                             '''
@@ -107,6 +137,8 @@ pipeline {
                     steps {
                         dir('department-service') {
                             sh '''
+                                set -e
+
                                 mvn clean package -DskipTests
                                 ls -la target
                             '''
@@ -118,6 +150,8 @@ pipeline {
                     steps {
                         dir('ApiGateway') {
                             sh '''
+                                set -e
+
                                 mvn clean package -DskipTests
                                 ls -la target
                             '''
@@ -130,6 +164,8 @@ pipeline {
         stage('Build Docker Images') {
             steps {
                 sh '''
+                    set -e
+
                     echo "Building Eureka Server image..."
                     docker build \
                         --platform linux/amd64 \
@@ -155,7 +191,7 @@ pipeline {
                         ./ApiGateway
 
                     echo "Created Docker images:"
-                    docker images | grep swapnamotupally
+                    docker images | grep "${DOCKERHUB_USERNAME}"
                 '''
             }
         }
@@ -170,6 +206,8 @@ pipeline {
                     )
                 ]) {
                     sh '''
+                        set -e
+
                         echo "$DOCKER_TOKEN" |
                         docker login \
                             --username "$DOCKER_USERNAME" \
@@ -182,9 +220,18 @@ pipeline {
         stage('Push Images to Docker Hub') {
             steps {
                 sh '''
+                    set -e
+
+                    echo "Pushing Eureka image..."
                     docker push ${EUREKA_IMAGE}
+
+                    echo "Pushing Employee Service image..."
                     docker push ${EMPLOYEE_IMAGE}
+
+                    echo "Pushing Department Service image..."
                     docker push ${DEPARTMENT_IMAGE}
+
+                    echo "Pushing API Gateway image..."
                     docker push ${GATEWAY_IMAGE}
                 '''
             }
@@ -201,14 +248,21 @@ pipeline {
                     ]
                 ]) {
                     sh '''
+                        set -e
+
+                        echo "AWS identity:"
                         aws sts get-caller-identity
 
+                        echo "Updating kubeconfig..."
                         aws eks update-kubeconfig \
                             --region ${AWS_REGION} \
                             --name ${EKS_CLUSTER}
 
+                        echo "Current Kubernetes context:"
                         kubectl config current-context
-                        kubectl get nodes
+
+                        echo "Cluster nodes:"
+                        kubectl get nodes -o wide
                     '''
                 }
             }
@@ -225,6 +279,8 @@ pipeline {
                     ]
                 ]) {
                     sh '''
+                        set -e
+
                         aws eks update-kubeconfig \
                             --region ${AWS_REGION} \
                             --name ${EKS_CLUSTER}
@@ -236,7 +292,7 @@ pipeline {
             }
         }
 
-        stage('Deploy Kubernetes Resources') {
+        stage('Deploy MySQL') {
             steps {
                 withCredentials([
                     [
@@ -247,35 +303,41 @@ pipeline {
                     ]
                 ]) {
                     sh '''
+                        set -e
+
                         aws eks update-kubeconfig \
                             --region ${AWS_REGION} \
                             --name ${EKS_CLUSTER}
+
+                        echo "Applying MySQL resources..."
 
                         kubectl apply \
                             -f kubernetes/mysql.yml \
                             -n ${K8S_NAMESPACE}
 
-                        kubectl apply \
-                            -f kubernetes/eureka.yml \
-                            -n ${K8S_NAMESPACE}
+                        echo "Current StorageClasses:"
+                        kubectl get storageclass
 
-                        kubectl apply \
-                            -f kubernetes/employee.yml \
-                            -n ${K8S_NAMESPACE}
+                        echo "Waiting for MySQL PVC to become Bound..."
 
-                        kubectl apply \
-                            -f kubernetes/department.yml \
-                            -n ${K8S_NAMESPACE}
+                        kubectl wait \
+                            --for=jsonpath='{.status.phase}'=Bound \
+                            pvc/mysql-pvc \
+                            -n ${K8S_NAMESPACE} \
+                            --timeout=300s
 
-                        kubectl apply \
-                            -f kubernetes/api-gateway.yml \
-                            -n ${K8S_NAMESPACE}
+                        echo "Waiting for MySQL Deployment..."
+
+                        kubectl rollout status \
+                            deployment/mysql-db \
+                            -n ${K8S_NAMESPACE} \
+                            --timeout=300s
                     '''
                 }
             }
         }
 
-        stage('Update Kubernetes Images') {
+        stage('Deploy Eureka Server') {
             steps {
                 withCredentials([
                     [
@@ -286,35 +348,160 @@ pipeline {
                     ]
                 ]) {
                     sh '''
+                        set -e
+
                         aws eks update-kubeconfig \
                             --region ${AWS_REGION} \
                             --name ${EKS_CLUSTER}
+
+                        kubectl apply \
+                            -f kubernetes/eureka.yml \
+                            -n ${K8S_NAMESPACE}
 
                         kubectl set image \
                             deployment/eureka-server \
                             eureka-server=${EUREKA_IMAGE} \
                             -n ${K8S_NAMESPACE}
 
-                        kubectl set image \
-                            deployment/employee-service \
-                            employee-service=${EMPLOYEE_IMAGE} \
-                            -n ${K8S_NAMESPACE}
+                        kubectl patch deployment eureka-server \
+                            -n ${K8S_NAMESPACE} \
+                            --type='strategic' \
+                            -p='{
+                                "spec": {
+                                    "template": {
+                                        "spec": {
+                                            "containers": [
+                                                {
+                                                    "name": "eureka-server",
+                                                    "imagePullPolicy": "Always"
+                                                }
+                                            ]
+                                        }
+                                    }
+                                }
+                            }'
 
-                        kubectl set image \
-                            deployment/department-service \
-                            department-service=${DEPARTMENT_IMAGE} \
-                            -n ${K8S_NAMESPACE}
-
-                        kubectl set image \
-                            deployment/api-gateway \
-                            api-gateway=${GATEWAY_IMAGE} \
-                            -n ${K8S_NAMESPACE}
+                        kubectl rollout status \
+                            deployment/eureka-server \
+                            -n ${K8S_NAMESPACE} \
+                            --timeout=300s
                     '''
                 }
             }
         }
 
-        stage('Verify Kubernetes Rollout') {
+        stage('Deploy Business Services') {
+            parallel {
+
+                stage('Deploy Employee Service') {
+                    steps {
+                        withCredentials([
+                            [
+                                $class: 'AmazonWebServicesCredentialsBinding',
+                                credentialsId: "${AWS_CREDENTIALS_ID}",
+                                accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                                secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                            ]
+                        ]) {
+                            sh '''
+                                set -e
+
+                                aws eks update-kubeconfig \
+                                    --region ${AWS_REGION} \
+                                    --name ${EKS_CLUSTER}
+
+                                kubectl apply \
+                                    -f kubernetes/employee.yml \
+                                    -n ${K8S_NAMESPACE}
+
+                                kubectl set image \
+                                    deployment/employee-service \
+                                    employee-service=${EMPLOYEE_IMAGE} \
+                                    -n ${K8S_NAMESPACE}
+
+                                kubectl patch deployment employee-service \
+                                    -n ${K8S_NAMESPACE} \
+                                    --type='strategic' \
+                                    -p='{
+                                        "spec": {
+                                            "template": {
+                                                "spec": {
+                                                    "containers": [
+                                                        {
+                                                            "name": "employee-service",
+                                                            "imagePullPolicy": "Always"
+                                                        }
+                                                    ]
+                                                }
+                                            }
+                                        }
+                                    }'
+
+                                kubectl rollout status \
+                                    deployment/employee-service \
+                                    -n ${K8S_NAMESPACE} \
+                                    --timeout=300s
+                            '''
+                        }
+                    }
+                }
+
+                stage('Deploy Department Service') {
+                    steps {
+                        withCredentials([
+                            [
+                                $class: 'AmazonWebServicesCredentialsBinding',
+                                credentialsId: "${AWS_CREDENTIALS_ID}",
+                                accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                                secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                            ]
+                        ]) {
+                            sh '''
+                                set -e
+
+                                aws eks update-kubeconfig \
+                                    --region ${AWS_REGION} \
+                                    --name ${EKS_CLUSTER}
+
+                                kubectl apply \
+                                    -f kubernetes/department.yml \
+                                    -n ${K8S_NAMESPACE}
+
+                                kubectl set image \
+                                    deployment/department-service \
+                                    department-service=${DEPARTMENT_IMAGE} \
+                                    -n ${K8S_NAMESPACE}
+
+                                kubectl patch deployment department-service \
+                                    -n ${K8S_NAMESPACE} \
+                                    --type='strategic' \
+                                    -p='{
+                                        "spec": {
+                                            "template": {
+                                                "spec": {
+                                                    "containers": [
+                                                        {
+                                                            "name": "department-service",
+                                                            "imagePullPolicy": "Always"
+                                                        }
+                                                    ]
+                                                }
+                                            }
+                                        }
+                                    }'
+
+                                kubectl rollout status \
+                                    deployment/department-service \
+                                    -n ${K8S_NAMESPACE} \
+                                    --timeout=300s
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Deploy API Gateway') {
             steps {
                 withCredentials([
                     [
@@ -325,26 +512,73 @@ pipeline {
                     ]
                 ]) {
                     sh '''
+                        set -e
+
                         aws eks update-kubeconfig \
                             --region ${AWS_REGION} \
                             --name ${EKS_CLUSTER}
 
+                        kubectl apply \
+                            -f kubernetes/api-gateway.yml \
+                            -n ${K8S_NAMESPACE}
+
+                        kubectl set image \
+                            deployment/api-gateway \
+                            api-gateway=${GATEWAY_IMAGE} \
+                            -n ${K8S_NAMESPACE}
+
+                        kubectl patch deployment api-gateway \
+                            -n ${K8S_NAMESPACE} \
+                            --type='strategic' \
+                            -p='{
+                                "spec": {
+                                    "template": {
+                                        "spec": {
+                                            "containers": [
+                                                {
+                                                    "name": "api-gateway",
+                                                    "imagePullPolicy": "Always"
+                                                }
+                                            ]
+                                        }
+                                    }
+                                }
+                            }'
+
                         kubectl rollout status \
+                            deployment/api-gateway \
+                            -n ${K8S_NAMESPACE} \
+                            --timeout=300s
+                    '''
+                }
+            }
+        }
+
+        stage('Verify Complete Deployment') {
+            steps {
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: "${AWS_CREDENTIALS_ID}",
+                        accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                        secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                    ]
+                ]) {
+                    sh '''
+                        set -e
+
+                        aws eks update-kubeconfig \
+                            --region ${AWS_REGION} \
+                            --name ${EKS_CLUSTER}
+
+                        echo "Waiting for all Deployments to become available..."
+
+                        kubectl wait \
+                            --for=condition=Available \
+                            deployment/mysql-db \
                             deployment/eureka-server \
-                            -n ${K8S_NAMESPACE} \
-                            --timeout=300s
-
-                        kubectl rollout status \
                             deployment/employee-service \
-                            -n ${K8S_NAMESPACE} \
-                            --timeout=300s
-
-                        kubectl rollout status \
                             deployment/department-service \
-                            -n ${K8S_NAMESPACE} \
-                            --timeout=300s
-
-                        kubectl rollout status \
                             deployment/api-gateway \
                             -n ${K8S_NAMESPACE} \
                             --timeout=300s
@@ -364,24 +598,52 @@ pipeline {
                     ]
                 ]) {
                     sh '''
+                        set -e
+
                         aws eks update-kubeconfig \
                             --region ${AWS_REGION} \
                             --name ${EKS_CLUSTER}
 
-                        echo "Deployments:"
+                        echo "=============================="
+                        echo "Nodes"
+                        echo "=============================="
+
+                        kubectl get nodes \
+                            -o custom-columns=NAME:.metadata.name,TYPE:.metadata.labels.node\\.kubernetes\\.io/instance-type,PODS:.status.capacity.pods,STATUS:.status.conditions[-1].type
+
+                        echo "=============================="
+                        echo "Deployments"
+                        echo "=============================="
+
                         kubectl get deployments \
                             -n ${K8S_NAMESPACE}
 
-                        echo "Pods:"
+                        echo "=============================="
+                        echo "Pods"
+                        echo "=============================="
+
                         kubectl get pods \
                             -n ${K8S_NAMESPACE} \
                             -o wide
 
-                        echo "Services:"
+                        echo "=============================="
+                        echo "Services"
+                        echo "=============================="
+
                         kubectl get services \
                             -n ${K8S_NAMESPACE}
 
-                        echo "Docker image tag deployed:"
+                        echo "=============================="
+                        echo "PersistentVolumeClaims"
+                        echo "=============================="
+
+                        kubectl get pvc \
+                            -n ${K8S_NAMESPACE}
+
+                        echo "=============================="
+                        echo "Deployed Docker image tag"
+                        echo "=============================="
+
                         echo "${IMAGE_TAG}"
                     '''
                 }
@@ -418,16 +680,51 @@ pipeline {
                         --region ${AWS_REGION} \
                         --name ${EKS_CLUSTER} || true
 
-                    echo "Pods:"
+                    echo "=============================="
+                    echo "Nodes"
+                    echo "=============================="
+
+                    kubectl get nodes -o wide || true
+
+                    echo "=============================="
+                    echo "Deployments"
+                    echo "=============================="
+
+                    kubectl get deployments \
+                        -n ${K8S_NAMESPACE} || true
+
+                    echo "=============================="
+                    echo "Pods"
+                    echo "=============================="
+
                     kubectl get pods \
                         -n ${K8S_NAMESPACE} \
                         -o wide || true
 
-                    echo "Deployments:"
-                    kubectl get deployments \
+                    echo "=============================="
+                    echo "PersistentVolumeClaims"
+                    echo "=============================="
+
+                    kubectl get pvc \
                         -n ${K8S_NAMESPACE} || true
 
-                    echo "Recent events:"
+                    echo "=============================="
+                    echo "StorageClasses"
+                    echo "=============================="
+
+                    kubectl get storageclass || true
+
+                    echo "=============================="
+                    echo "Pod descriptions"
+                    echo "=============================="
+
+                    kubectl describe pods \
+                        -n ${K8S_NAMESPACE} || true
+
+                    echo "=============================="
+                    echo "Recent events"
+                    echo "=============================="
+
                     kubectl get events \
                         -n ${K8S_NAMESPACE} \
                         --sort-by=.metadata.creationTimestamp || true

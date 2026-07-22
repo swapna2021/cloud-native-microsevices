@@ -20,8 +20,8 @@ spec:
       containers:
       - name: eureka-server
 
-        image: eureka-server:1.0
-        imagePullPolicy: Never
+        image: swapnamotupally/eureka-server:latest
+        imagePullPolicy: Always
 
         ports:
         - containerPort: 8761

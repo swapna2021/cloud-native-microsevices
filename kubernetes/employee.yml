@@ -19,8 +19,8 @@ spec:
     spec:
       containers:
         - name: employee-service
-          image: employee-service:1.0
-          imagePullPolicy: Never
+          image: swapnamotupally/employee-service:latest
+          imagePullPolicy: Always
 
           ports:
             - containerPort: 8081
