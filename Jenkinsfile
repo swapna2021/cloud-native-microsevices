@@ -19,20 +19,24 @@ pipeline {
         IMAGE_TAG = "${BUILD_NUMBER}"
 
         EUREKA_IMAGE =
-                "${DOCKERHUB_USERNAME}/eureka-server:${IMAGE_TAG}"
+            "${DOCKERHUB_USERNAME}/eureka-server:${IMAGE_TAG}"
 
         EMPLOYEE_IMAGE =
-                "${DOCKERHUB_USERNAME}/employee-service:${IMAGE_TAG}"
+            "${DOCKERHUB_USERNAME}/employee-service:${IMAGE_TAG}"
 
         DEPARTMENT_IMAGE =
-                "${DOCKERHUB_USERNAME}/department-service:${IMAGE_TAG}"
+            "${DOCKERHUB_USERNAME}/department-service:${IMAGE_TAG}"
 
         GATEWAY_IMAGE =
-                "${DOCKERHUB_USERNAME}/api-gateway:${IMAGE_TAG}"
+            "${DOCKERHUB_USERNAME}/api-gateway:${IMAGE_TAG}"
 
         AWS_REGION = "ap-south-1"
         EKS_CLUSTER = "microservices-cluster"
         K8S_NAMESPACE = "microservices"
+
+        // Jenkins-specific kubeconfig.
+        // This prevents corruption of ~/.kube/config.
+        KUBECONFIG = "${WORKSPACE}/.kube/config"
     }
 
     options {
@@ -93,6 +97,7 @@ pipeline {
                     echo "Checking Kubernetes manifest files..."
 
                     test -f kubernetes/namespace.yml
+                    test -f kubernetes/gp3-storageclass.yml
                     test -f kubernetes/mysql.yml
                     test -f kubernetes/eureka.yml
                     test -f kubernetes/employee.yml
@@ -167,31 +172,37 @@ pipeline {
                     set -e
 
                     echo "Building Eureka Server image..."
+
                     docker build \
                         --platform linux/amd64 \
-                        -t ${EUREKA_IMAGE} \
+                        -t "${EUREKA_IMAGE}" \
                         ./EurekaServer
 
                     echo "Building Employee Service image..."
+
                     docker build \
                         --platform linux/amd64 \
-                        -t ${EMPLOYEE_IMAGE} \
+                        -t "${EMPLOYEE_IMAGE}" \
                         ./employee-service
 
                     echo "Building Department Service image..."
+
                     docker build \
                         --platform linux/amd64 \
-                        -t ${DEPARTMENT_IMAGE} \
+                        -t "${DEPARTMENT_IMAGE}" \
                         ./department-service
 
                     echo "Building API Gateway image..."
+
                     docker build \
                         --platform linux/amd64 \
-                        -t ${GATEWAY_IMAGE} \
+                        -t "${GATEWAY_IMAGE}" \
                         ./ApiGateway
 
                     echo "Created Docker images:"
-                    docker images | grep "${DOCKERHUB_USERNAME}"
+
+                    docker images |
+                        grep "${DOCKERHUB_USERNAME}" || true
                 '''
             }
         }
@@ -209,9 +220,9 @@ pipeline {
                         set -e
 
                         echo "$DOCKER_TOKEN" |
-                        docker login \
-                            --username "$DOCKER_USERNAME" \
-                            --password-stdin
+                            docker login \
+                                --username "$DOCKER_USERNAME" \
+                                --password-stdin
                     '''
                 }
             }
@@ -223,21 +234,21 @@ pipeline {
                     set -e
 
                     echo "Pushing Eureka image..."
-                    docker push ${EUREKA_IMAGE}
+                    docker push "${EUREKA_IMAGE}"
 
                     echo "Pushing Employee Service image..."
-                    docker push ${EMPLOYEE_IMAGE}
+                    docker push "${EMPLOYEE_IMAGE}"
 
                     echo "Pushing Department Service image..."
-                    docker push ${DEPARTMENT_IMAGE}
+                    docker push "${DEPARTMENT_IMAGE}"
 
                     echo "Pushing API Gateway image..."
-                    docker push ${GATEWAY_IMAGE}
+                    docker push "${GATEWAY_IMAGE}"
                 '''
             }
         }
 
-        stage('Connect Jenkins to Amazon EKS') {
+        stage('Configure Amazon EKS') {
             steps {
                 withCredentials([
                     [
@@ -253,10 +264,17 @@ pipeline {
                         echo "AWS identity:"
                         aws sts get-caller-identity
 
-                        echo "Updating kubeconfig..."
+                        echo "Creating Jenkins-specific kubeconfig..."
+
+                        mkdir -p "${WORKSPACE}/.kube"
+
+                        # Remove any old or corrupted workspace kubeconfig.
+                        rm -f "${KUBECONFIG}"
+
                         aws eks update-kubeconfig \
-                            --region ${AWS_REGION} \
-                            --name ${EKS_CLUSTER}
+                            --region "${AWS_REGION}" \
+                            --name "${EKS_CLUSTER}" \
+                            --kubeconfig "${KUBECONFIG}"
 
                         echo "Current Kubernetes context:"
                         kubectl config current-context
@@ -281,12 +299,34 @@ pipeline {
                     sh '''
                         set -e
 
-                        aws eks update-kubeconfig \
-                            --region ${AWS_REGION} \
-                            --name ${EKS_CLUSTER}
-
                         kubectl apply \
                             -f kubernetes/namespace.yml
+                    '''
+                }
+            }
+        }
+
+        stage('Configure EBS Storage') {
+            steps {
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: "${AWS_CREDENTIALS_ID}",
+                        accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                        secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                    ]
+                ]) {
+                    sh '''
+                        set -e
+
+                        echo "Applying gp3 StorageClass..."
+
+                        kubectl apply \
+                            -f kubernetes/gp3-storageclass.yml
+
+                        echo "Available StorageClasses:"
+
+                        kubectl get storageclass
                     '''
                 }
             }
@@ -305,32 +345,30 @@ pipeline {
                     sh '''
                         set -e
 
-                        aws eks update-kubeconfig \
-                            --region ${AWS_REGION} \
-                            --name ${EKS_CLUSTER}
-
                         echo "Applying MySQL resources..."
 
                         kubectl apply \
                             -f kubernetes/mysql.yml \
-                            -n ${K8S_NAMESPACE}
-
-                        echo "Current StorageClasses:"
-                        kubectl get storageclass
+                            -n "${K8S_NAMESPACE}"
 
                         echo "Waiting for MySQL PVC to become Bound..."
 
                         kubectl wait \
                             --for=jsonpath='{.status.phase}'=Bound \
                             pvc/mysql-pvc \
-                            -n ${K8S_NAMESPACE} \
+                            -n "${K8S_NAMESPACE}" \
                             --timeout=300s
+
+                        echo "MySQL PVC status:"
+
+                        kubectl get pvc \
+                            -n "${K8S_NAMESPACE}"
 
                         echo "Waiting for MySQL Deployment..."
 
                         kubectl rollout status \
                             deployment/mysql-db \
-                            -n ${K8S_NAMESPACE} \
+                            -n "${K8S_NAMESPACE}" \
                             --timeout=300s
                     '''
                 }
@@ -350,21 +388,19 @@ pipeline {
                     sh '''
                         set -e
 
-                        aws eks update-kubeconfig \
-                            --region ${AWS_REGION} \
-                            --name ${EKS_CLUSTER}
+                        echo "Deploying Eureka Server..."
 
                         kubectl apply \
                             -f kubernetes/eureka.yml \
-                            -n ${K8S_NAMESPACE}
+                            -n "${K8S_NAMESPACE}"
 
                         kubectl set image \
                             deployment/eureka-server \
-                            eureka-server=${EUREKA_IMAGE} \
-                            -n ${K8S_NAMESPACE}
+                            eureka-server="${EUREKA_IMAGE}" \
+                            -n "${K8S_NAMESPACE}"
 
                         kubectl patch deployment eureka-server \
-                            -n ${K8S_NAMESPACE} \
+                            -n "${K8S_NAMESPACE}" \
                             --type='strategic' \
                             -p='{
                                 "spec": {
@@ -383,7 +419,7 @@ pipeline {
 
                         kubectl rollout status \
                             deployment/eureka-server \
-                            -n ${K8S_NAMESPACE} \
+                            -n "${K8S_NAMESPACE}" \
                             --timeout=300s
                     '''
                 }
@@ -406,21 +442,19 @@ pipeline {
                             sh '''
                                 set -e
 
-                                aws eks update-kubeconfig \
-                                    --region ${AWS_REGION} \
-                                    --name ${EKS_CLUSTER}
+                                echo "Deploying Employee Service..."
 
                                 kubectl apply \
                                     -f kubernetes/employee.yml \
-                                    -n ${K8S_NAMESPACE}
+                                    -n "${K8S_NAMESPACE}"
 
                                 kubectl set image \
                                     deployment/employee-service \
-                                    employee-service=${EMPLOYEE_IMAGE} \
-                                    -n ${K8S_NAMESPACE}
+                                    employee-service="${EMPLOYEE_IMAGE}" \
+                                    -n "${K8S_NAMESPACE}"
 
                                 kubectl patch deployment employee-service \
-                                    -n ${K8S_NAMESPACE} \
+                                    -n "${K8S_NAMESPACE}" \
                                     --type='strategic' \
                                     -p='{
                                         "spec": {
@@ -439,7 +473,7 @@ pipeline {
 
                                 kubectl rollout status \
                                     deployment/employee-service \
-                                    -n ${K8S_NAMESPACE} \
+                                    -n "${K8S_NAMESPACE}" \
                                     --timeout=300s
                             '''
                         }
@@ -459,21 +493,19 @@ pipeline {
                             sh '''
                                 set -e
 
-                                aws eks update-kubeconfig \
-                                    --region ${AWS_REGION} \
-                                    --name ${EKS_CLUSTER}
+                                echo "Deploying Department Service..."
 
                                 kubectl apply \
                                     -f kubernetes/department.yml \
-                                    -n ${K8S_NAMESPACE}
+                                    -n "${K8S_NAMESPACE}"
 
                                 kubectl set image \
                                     deployment/department-service \
-                                    department-service=${DEPARTMENT_IMAGE} \
-                                    -n ${K8S_NAMESPACE}
+                                    department-service="${DEPARTMENT_IMAGE}" \
+                                    -n "${K8S_NAMESPACE}"
 
                                 kubectl patch deployment department-service \
-                                    -n ${K8S_NAMESPACE} \
+                                    -n "${K8S_NAMESPACE}" \
                                     --type='strategic' \
                                     -p='{
                                         "spec": {
@@ -492,7 +524,7 @@ pipeline {
 
                                 kubectl rollout status \
                                     deployment/department-service \
-                                    -n ${K8S_NAMESPACE} \
+                                    -n "${K8S_NAMESPACE}" \
                                     --timeout=300s
                             '''
                         }
@@ -514,21 +546,19 @@ pipeline {
                     sh '''
                         set -e
 
-                        aws eks update-kubeconfig \
-                            --region ${AWS_REGION} \
-                            --name ${EKS_CLUSTER}
+                        echo "Deploying API Gateway..."
 
                         kubectl apply \
                             -f kubernetes/api-gateway.yml \
-                            -n ${K8S_NAMESPACE}
+                            -n "${K8S_NAMESPACE}"
 
                         kubectl set image \
                             deployment/api-gateway \
-                            api-gateway=${GATEWAY_IMAGE} \
-                            -n ${K8S_NAMESPACE}
+                            api-gateway="${GATEWAY_IMAGE}" \
+                            -n "${K8S_NAMESPACE}"
 
                         kubectl patch deployment api-gateway \
-                            -n ${K8S_NAMESPACE} \
+                            -n "${K8S_NAMESPACE}" \
                             --type='strategic' \
                             -p='{
                                 "spec": {
@@ -547,7 +577,7 @@ pipeline {
 
                         kubectl rollout status \
                             deployment/api-gateway \
-                            -n ${K8S_NAMESPACE} \
+                            -n "${K8S_NAMESPACE}" \
                             --timeout=300s
                     '''
                 }
@@ -567,11 +597,7 @@ pipeline {
                     sh '''
                         set -e
 
-                        aws eks update-kubeconfig \
-                            --region ${AWS_REGION} \
-                            --name ${EKS_CLUSTER}
-
-                        echo "Waiting for all Deployments to become available..."
+                        echo "Waiting for all deployments to become available..."
 
                         kubectl wait \
                             --for=condition=Available \
@@ -580,8 +606,14 @@ pipeline {
                             deployment/employee-service \
                             deployment/department-service \
                             deployment/api-gateway \
-                            -n ${K8S_NAMESPACE} \
+                            -n "${K8S_NAMESPACE}" \
                             --timeout=300s
+
+                        echo "Confirming deployed image tags..."
+
+                        kubectl get deployments \
+                            -n "${K8S_NAMESPACE}" \
+                            -o 'custom-columns=DEPLOYMENT:.metadata.name,IMAGE:.spec.template.spec.containers[*].image'
                     '''
                 }
             }
@@ -600,30 +632,34 @@ pipeline {
                     sh '''
                         set -e
 
-                        aws eks update-kubeconfig \
-                            --region ${AWS_REGION} \
-                            --name ${EKS_CLUSTER}
-
                         echo "=============================="
                         echo "Nodes"
                         echo "=============================="
 
                         kubectl get nodes \
-                            -o custom-columns=NAME:.metadata.name,TYPE:.metadata.labels.node\\.kubernetes\\.io/instance-type,PODS:.status.capacity.pods,STATUS:.status.conditions[-1].type
+                            -o 'custom-columns=NAME:.metadata.name,TYPE:.metadata.labels.node\\.kubernetes\\.io/instance-type,POD-CAPACITY:.status.capacity.pods'
 
                         echo "=============================="
                         echo "Deployments"
                         echo "=============================="
 
                         kubectl get deployments \
-                            -n ${K8S_NAMESPACE}
+                            -n "${K8S_NAMESPACE}"
+
+                        echo "=============================="
+                        echo "Deployed Images"
+                        echo "=============================="
+
+                        kubectl get deployments \
+                            -n "${K8S_NAMESPACE}" \
+                            -o 'custom-columns=DEPLOYMENT:.metadata.name,IMAGE:.spec.template.spec.containers[*].image'
 
                         echo "=============================="
                         echo "Pods"
                         echo "=============================="
 
                         kubectl get pods \
-                            -n ${K8S_NAMESPACE} \
+                            -n "${K8S_NAMESPACE}" \
                             -o wide
 
                         echo "=============================="
@@ -631,20 +667,27 @@ pipeline {
                         echo "=============================="
 
                         kubectl get services \
-                            -n ${K8S_NAMESPACE}
+                            -n "${K8S_NAMESPACE}"
 
                         echo "=============================="
                         echo "PersistentVolumeClaims"
                         echo "=============================="
 
                         kubectl get pvc \
-                            -n ${K8S_NAMESPACE}
+                            -n "${K8S_NAMESPACE}"
 
                         echo "=============================="
-                        echo "Deployed Docker image tag"
+                        echo "StorageClasses"
                         echo "=============================="
 
-                        echo "${IMAGE_TAG}"
+                        kubectl get storageclass
+
+                        echo "=============================="
+                        echo "Jenkins Build"
+                        echo "=============================="
+
+                        echo "Build number: ${BUILD_NUMBER}"
+                        echo "Docker image tag: ${IMAGE_TAG}"
                     '''
                 }
             }
@@ -676,9 +719,17 @@ pipeline {
                 ]
             ]) {
                 sh '''
+                    set +e
+
+                    mkdir -p "${WORKSPACE}/.kube"
+
+                    # Recreate the workspace kubeconfig safely.
+                    rm -f "${KUBECONFIG}"
+
                     aws eks update-kubeconfig \
-                        --region ${AWS_REGION} \
-                        --name ${EKS_CLUSTER} || true
+                        --region "${AWS_REGION}" \
+                        --name "${EKS_CLUSTER}" \
+                        --kubeconfig "${KUBECONFIG}"
 
                     echo "=============================="
                     echo "Nodes"
@@ -691,14 +742,22 @@ pipeline {
                     echo "=============================="
 
                     kubectl get deployments \
-                        -n ${K8S_NAMESPACE} || true
+                        -n "${K8S_NAMESPACE}" || true
+
+                    echo "=============================="
+                    echo "Deployed Images"
+                    echo "=============================="
+
+                    kubectl get deployments \
+                        -n "${K8S_NAMESPACE}" \
+                        -o 'custom-columns=DEPLOYMENT:.metadata.name,IMAGE:.spec.template.spec.containers[*].image' || true
 
                     echo "=============================="
                     echo "Pods"
                     echo "=============================="
 
                     kubectl get pods \
-                        -n ${K8S_NAMESPACE} \
+                        -n "${K8S_NAMESPACE}" \
                         -o wide || true
 
                     echo "=============================="
@@ -706,7 +765,7 @@ pipeline {
                     echo "=============================="
 
                     kubectl get pvc \
-                        -n ${K8S_NAMESPACE} || true
+                        -n "${K8S_NAMESPACE}" || true
 
                     echo "=============================="
                     echo "StorageClasses"
@@ -719,14 +778,14 @@ pipeline {
                     echo "=============================="
 
                     kubectl describe pods \
-                        -n ${K8S_NAMESPACE} || true
+                        -n "${K8S_NAMESPACE}" || true
 
                     echo "=============================="
                     echo "Recent events"
                     echo "=============================="
 
                     kubectl get events \
-                        -n ${K8S_NAMESPACE} \
+                        -n "${K8S_NAMESPACE}" \
                         --sort-by=.metadata.creationTimestamp || true
                 '''
             }
