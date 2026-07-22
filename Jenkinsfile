@@ -17,7 +17,7 @@ pipeline {
 
         AWS_REGION = "ap-south-1"
 
-        EKS_CLUSTER = "YOUR_EKS_CLUSTER_NAME"
+        EKS_CLUSTER = "microservices-cluster"
 
         K8S_NAMESPACE = "microservices"
     }
